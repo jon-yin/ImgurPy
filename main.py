@@ -1,15 +1,19 @@
-import requests
-import re
-import json
+from post import Post
 import utils
+import requests
 
-URL = "https://i.imgur.com/EH0u0aD.jpg"
 test_file = "test.txt"
-with open("test.txt") as fh:
+
+def driver(source):
+    ids = utils.fetch_image_ids(source)
+    metadatas = [utils.fetch_metadata(source, id) for id in ids]
+    posts = [Post(metadata) for metadata in metadatas]
+    utils.download("./test_files/album1", *posts)
+
+with open(test_file) as fh:
     body = fh.read()
-    ids = utils.fetch_image_ids(body)
-    utils.fetch_extensions(body,ids[0])
-# img_page = requests.get(URL).content
-# #print(img_page)
-# with open(test_file, "wb") as fh:
-#     fh.write(img_page)
+
+body = str(requests.get(TEST_URL).content, encoding="utf-8")
+#with open("test_file_2.txt", "w")as fh:
+#    fh.write(body)
+driver(body)
