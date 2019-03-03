@@ -8,7 +8,9 @@ class Post():
             raise ValueError
 
     def file_name(self):
-        return self.metadata["hash"] + self.metadata["ext"]
+        ext = self.metadata["ext"]
+        ext = ext[0:4]
+        return self.metadata["hash"] + ext
 
     def image_location(self):
         filename = self.metadata["hash"] + self.metadata["ext"]
