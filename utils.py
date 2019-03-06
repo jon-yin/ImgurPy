@@ -2,26 +2,25 @@ import re
 import json
 import requests
 import os.path, os
-from concurrent.futures import ThreadPoolExecutor,as_completed, wait
-
-'''
-{"id":18999119,"hash":"64XlUaS","account_id":"1085967","account_url":"Seanhiruki","title":"Attack on Persona 4","score":73,"starting_score":0,"virality":6011.151723,"size":255023,"views":"343","is_hot":false,"is_album":false,"album_cover":null,"album_cover_width":0,"album_cover_height":0,"mimetype":"image\/jpeg","ext":".jpg","width":644,"height":910,"animated":false,"looping":false,"ups":73,"downs":0,"points":73,"reddit":null,"description":"","bandwidth":"83.42 MB","timestamp":"2013-11-09 06:42:06","hot_datetime":null,"gallery_datetime":"2013-11-09 06:42:06","in_gallery":true,"section":"","tags":["0","0"],"subtype":null,"spam":"0","pending":"0","comment_count":2,"nsfw":false,"topic":null,"topic_id":0,"meme_name":null,"meme_top":null,"meme_bottom":null,"prefer_video":false,"video_source":null,"video_host":null,"num_images":1,"platform":null,"readonly":false,"ad_type":0,"ad_url":"","weight":-1,"favorite_count":56,"favorited":false,"adConfig":{"safeFlags":["in_gallery","onsfw_mod_safe","gallery","page_load"],"highRiskFlags":["age_gate"],"unsafeFlags":[],"showsAds":true},"vote":null}'''
+from concurrent.futures import ThreadPoolExecutor,as_completed
+import tqdm
 
 class AlbumHandler():
-    ext_str = '''(\{.*?"hash":%s)'''
-    IMG_IDS = re.compile('''\{.*?"hash":(.*?),''')
+    IMG_IDS = re.compile('''\{.+?"hash":(.*?),''')
 
-    def fetch_image_ids(self, data):
-        return list(set(AlbumHandler.IMG_IDS.findall(data)))
+    def fetch_metadatas(self, data):
+        first_match =  next(AlbumHandler.IMG_IDS.finditer(data))
+        index = first_match.start(0)
+        parsed_json = parse_json(data[index+1:])
+        res_json = json.loads(parsed_json)
+        try:
+            return res_json["album_images"]["images"]
+        except KeyError:
+            return [res_json]
 
-    def fetch_metadata(self, data,id):
-        match = next(re.finditer(self.ext_str % id,data))
-        index = match.start(1)
-        json_data = parse_json(data[index:])
-        return json.loads(json_data)
-
-    def fetch_metadatas(self, data, ids):
-        return [self.fetch_metadata(data, id) for id in ids]
+    def handle_urls(self,urls):
+        datas = [requests.get(url) for url in urls]
+        return [self.fetch_metadatas(data) for data in datas]
 
 
 
@@ -61,23 +60,19 @@ class SearchHandler():
     def fetch_metadata(self, id):
         res = requests.get(self.IMAGE_LINK.format(id))
         body = str(res.content, encoding="utf-8")
-        ids = self.album_handler.fetch_image_ids(body)
-        return self.album_handler.fetch_metadatas(body, ids)
+        return (id, self.album_handler.fetch_metadatas(body))
 
     def fetch_metadatas(self, ids, multithread = False):
         if multithread:
             with ThreadPoolExecutor() as executor:
                 futures = [executor.submit(self.fetch_metadata, id) for id in ids]
             results = []
-            num_done = 0
-            num_futs = 0
-            for future in as_completed(futures, timeout=1):
-                num_futs += 1
-                comp = future.result()
-                num_done += len(comp)
-                results.append(comp)
-                print("NUM_DONE", num_futs)
-                print(len(results))
+            with tqdm.tqdm(total=len(futures)) as pbar:
+                pbar.desc = "Fetching and parsing metadata"
+                for future in as_completed(futures):
+                    comp = future.result()
+                    results.append(comp)
+                    pbar.update(1)
             return results
         return [self.fetch_metadata(id) for id in ids]
 
@@ -119,37 +114,93 @@ class SearchQuery():
         ALL = "all"
 
 def parse_json(body):
-    index = 1
     res_str = "{"
     inner_braces = 1
     while inner_braces > 0:
-        body.find("{")
+        index = body.find("{")
+        index_2 = body.find("}")
+        if index == -1 and index_2 == -1:
+            raise ValueError("Expected Json to end")
+        if index == -1:
+            index = index_2 + 1
+        elif index_2 == -1:
+            index_2 = index + 1
+        first_index = min(index, index_2)
+        res_str += body[:first_index + 1]
+        body = body[first_index+1:]
+        if (first_index == index):
+            inner_braces += 1
+        else:
+            inner_braces -= 1
     return res_str
 
 
-def get_image_data(posts):
-    urls = [post.image_location() for post in posts if post is not None]
-    image_data = [requests.get(url).content for url in urls]
+def get_image_data(posts, executor=None, log=True):
+    if executor is None:
+        urls = [post.image_location() for post in posts if post is not None]
+        if log:
+            print("Downloading images")
+        futures = [requests.get(url).content for url in urls]
+        if log:
+            print("Downloading complete")
+    else:
+        image_data = []
+        futures = []
+        for post in posts:
+            futures.append(executor.submit(get_single_image_data, post))
+        if log:
+            pbar = tqdm.tqdm(total=len(futures))
+            pbar.set_description("Downloading images")
+        for future in futures:
+            image_data.append(future.result())
+            if log:
+                pbar.update(1)
+        if log:
+            pbar.close()
     return image_data
 
-def download(filepath, *args, multithread=False, create_album_directory=False):
-    if not os.path.exists(filepath):
-        os.makedirs(filepath)
-    filenames = [post.file_name() for post in args if post is not None]
-    image_data = get_image_data(args)
+def get_single_image_data(post):
+    url = post.image_location()
+    return requests.get(url).content
+
+def download(filepath, *args, multithread=False, create_album_directory=False, log=True):
+    flattened_posts = [post for posts in args for post in posts[1]]
+
+    if multithread:
+        executor = ThreadPoolExecutor()
+        image_data = get_image_data(flattened_posts, executor,log)
+    else:
+        image_data = get_image_data(flattened_posts,log=log)
+    if create_album_directory:
+        filenames = [os.path.join(elem[0], post.file_name()) for elem in args for post in elem[1] if post is not None]
+    else:
+        filenames = [post.file_name() for elem in args for post in elem[1] if post is not None]
+    print("Writing Files")
     for i in range(len(filenames)):
+        fullpath = os.path.join(filepath, filenames[i])
+        dirname = os.path.dirname(fullpath)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
         if multithread:
-            executor = ThreadPoolExecutor()
-            executor.submit(write_image_file,os.path.join(filepath, filenames[i]), image_data[i])
+            futures = []
+            futures.append(executor.submit(write_image_file, fullpath, image_data[i]))
         else:
-            write_image_file(os.path.join(filepath, filenames[i]), image_data[i])
+            write_image_file(fullpath, image_data[i])
+    print("Writing Complete")
     if multithread:
         executor.shutdown(wait=True)
 
 
-def write_image_file(filename, body, create_dir=False):
+def write_image_file(filename, body):
     with open(filename, "wb") as fh:
         fh.write(body)
+
+def append_parent_dir(posts):
+    for elem in posts:
+        dir_name = elem[0].split(".")[0]
+        for i in range(len(elem)):
+            elem[i] = os.path.join(dir_name, elem[i])
+    return posts
 
 
 
