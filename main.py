@@ -1,9 +1,18 @@
-import requests
-
-import post
-import utils
 import argparse
+import urllib.request
+import handlers.SearchHandler as search
+import handlers.AlbumHandler as album
 
+
+def parse_search_url(url):
+    base, query = url.split("?")
+    params = urlparams_to_dict(query)
+    rank, time = base.split("/")[-2:]
+    return (rank, time, params)
+
+def urlparams_to_dict(url):
+    elems = [elem.split("=") for elem in url.split("&")]
+    return {urllib.request.unquote(elem[0]): urllib.request.unquote(elem[1]) for elem in elems}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="command line tool to download imgur files")
@@ -13,21 +22,15 @@ if __name__ == "__main__":
     parser.add_argument("--files", "-f",
                         help="urls to process that are stored in a text file (expects imgur gallery urls). Ignores search args if specified.",
                         nargs="+")
-    parser.add_argument("--query", "-q", help="query to search for in imgur")
-    parser.add_argument("--all",  help="Include results that contain all of these terms")
-    parser.add_argument("--any",  help="Include results that contain any of these terms")
-    parser.add_argument("--exact", "-e", help="Include results that contain exactly this query")
-    parser.add_argument("--none", "-n", help="Exclude results that contain any of these terms")
-    parser.add_argument("--tags", help="Include results with these tags")
-    parser.add_argument("--type",
-                        help="Only include items with this type. Valid types are: jpg, png, gif, anigif, album")
+    parser.add_argument("--query", "-q", help="query to search for in imgur (will execute a basic search with no advanced params)")
     parser.add_argument("--rank", "-r", help="What to rank search results by, valid ranks are time, score, relevance (default time)")
     parser.add_argument("--time",
                         help="What timeframe to retrieve results from, valid timeframes are day, week, month, year, all (default all)")
     parser.add_argument("--limit", '-l', type=int, help="Number of search results to include, omit to take as many as possible")
     parser.add_argument("--mkdir", action="store_true",
                         help="Create a separate directory for each imgur album", default=False)
-    parser.add_argument("--size", "-s", help = "Size of desired images, valid inputs are small, med, big, lrg, huge")
+    parser.add_argument("--searchurl", "-s", help = "Performs a search using a Imgur Search url, rank and time are automatically parsed as well as any advanced search params")
+    parser.add_argument("--appendparam", "-a", action="append", help= "Advanced: appends a key value pair to search request, should be of form key:value")
     parser.add_argument("path", help="filepath to save images to")
     args = parser.parse_args()
     allowed_times = {"day", "week", "month", "year", "all"}
@@ -44,7 +47,7 @@ if __name__ == "__main__":
             for file in args.files:
                 with open(file, "r") as fh:
                     urls.extend(fh.readlines())
-        with utils.AlbumHandler() as ah:
+        with album.AlbumHandler() as ah:
             ah.download(urls, args.path, args.mkdir)
     if (args.rank not in allowed_types):
         args.rank = "time"
@@ -52,33 +55,27 @@ if __name__ == "__main__":
     if (args.time not in allowed_types):
         args.time = "all"
 
-    query = utils.SearchQuery(type=args.rank, time=args.time)
+    query = search.SearchQuery(type=args.rank, time=args.time)
     if (args.query is not None):
         query.set_simple_query(args.query)
-        with utils.SearchHandler(query, limit) as sh:
+        with search.SearchHandler(query, limit) as sh:
             sh.download(args.path, args.mkdir)
         exit(0)
 
-    params = {}
-    if (args.all):
-        params["q_all"] = args.all
-    if (args.any):
-        params["q_any"] = args.any
-    if (args.exact):
-        params["q_exact"] = args.exact
-    if (args.none):
-        params["q_not"] = args.none
-    if (args.tags):
-        params["q_tags"] = args.tags
-    if (args.type):
-        params["q_type"] = args.type
-    if (args.size):
-        sizes = {"small", "med", "big", "lrg", "huge"}
-        if (args.size in sizes):
-            params["q_size_px"] = args.size
-            params["q_size_mpx"] = args.size
-    if (len(params) > 0):
+    if (args.searchurl is not None):
+        rank, time, params = parse_search_url(args.searchurl)
+        query = search.SearchQuery(rank, time)
         query.set_params(params)
-        with utils.SearchHandler(query, limit) as sh:
+        with search.SearchHandler(query, limit=limit) as sh:
             sh.download(args.path, args.mkdir)
+        exit(0)
+
+    if (args.appendparam is not None):
+        params = {x:y for elem in args.appendparam for x,y in elem.split(":")}
+        query = search.SearchQuery(args.rank, args.time)
+        query.set_params(params)
+        with search.SearchHandler(query, limit=limit) as sh:
+            sh.download(args.path, args.mkdir)
+        exit(0)
+
 
